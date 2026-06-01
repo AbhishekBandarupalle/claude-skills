@@ -1,6 +1,6 @@
 # Claude Skills
 
-Cursor agent skills for infrastructure automation.
+Claude agent skills for infrastructure automation.
 
 ## Skills
 
@@ -15,7 +15,10 @@ Deploy, repair, and redeploy Sylva OKD management clusters on bare metal (cabpoa
 - Health check script for quick status assessment
 - Automatic retry loop until all Sylva units are ready
 
-**Usage:** Reference this skill when working with Sylva cluster deployments in Cursor.
+**Usage:** Reference this skill when working with Sylva cluster deployments using Claude
+Add to the skills directory `~/.claude/claude-skills/sylva-cluster-deploy/SKILL.md` 
+
+Or on Cursor by adding to the directory `~/.cursor/skills/claude-skills/sylva-cluster-deploy/SKILL.md`
 
 ```
 sylva-cluster-deploy/
