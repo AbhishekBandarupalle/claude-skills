@@ -18,13 +18,50 @@ This skill manages the full lifecycle of a Sylva OKD management cluster:
 
 The cluster uses `bootstrap_provider: cabpoa` and `infra_provider: capm3` (bare metal with assisted installer).
 
+## Step 0: Read Environment
+
+Before asking anything, read `environment-values/my-okd-capm3/values.yaml` and extract:
+- **Cluster name**: `cluster.name` (e.g. `mgmt`)
+- **Node IP**: `cluster.baremetal_hosts.node0.ip_preallocations.primary`
+- **Longhorn disk device**: from `units.longhorn-okd-disk-sno.kustomization_spec.postBuild.substitute.LONGHORN_DISK_DEVICE`
+- **Longhorn disk path**: from `cluster.baremetal_hosts.node0.longhorn_disk_config[0].path`
+
+Echo to user:
+```
+Cluster: <name>
+Node IP: <ip>
+Longhorn disk: <device> → <path>
+```
+
 ## Step 1: Ask the User
 
-Before doing anything, ask whether this is a **Repair** or **Redeploy**:
+Present defaults and let the user confirm or override:
+
+### 1a. Mode
 
 ```
 Repair  — Detect current state, find failures, fix code, commit, retry
 Redeploy — Clean teardown + fresh bootstrap.sh from scratch
+```
+
+### 1b. Configuration (show defaults, ask if user wants to change)
+
+| Setting | Default | Notes |
+|---------|---------|-------|
+| SSH user | `core` | OKD/RHCOS default |
+| SSH key path | `~/.ssh/ocp_ssh_key` | Other option: `~/.ssh/id_rsa` |
+| Node IP | *(from values.yaml)* | Auto-detected |
+| BOOTSTRAP_WATCH_TIMEOUT_MIN | `240` | 4 hours |
+
+Ask: "Defaults above OK, or do you want to change any?"
+
+Store for session:
+```
+CLUSTER_NAME=<from values.yaml>
+NODE_SSH_USER=core
+NODE_SSH_KEY=~/.ssh/ocp_ssh_key
+NODE_IP=<from values.yaml>
+WATCH_TIMEOUT=240
 ```
 
 ## Step 2A: Redeploy (from scratch)
@@ -45,14 +82,14 @@ Verify required tools: `kubectl`, `kind`, `helm`, `yq`, `flux`, `clusterctl`, `s
 kind delete cluster --name sylva
 ```
 
-2. **Wipe longhorn disk** on the BMH node (if management cluster is reachable):
+2. **Wipe longhorn disk** on the BMH node via SSH:
+
 ```bash
-export KUBECONFIG=~/sylva-core/management-cluster-kubeconfig
-# Get the node name
-NODE=$(oc get nodes -o jsonpath='{.items[0].metadata.name}')
-# The disk path comes from environment-values — read it:
+ssh -i $NODE_SSH_KEY -o StrictHostKeyChecking=no $NODE_SSH_USER@$NODE_IP \
+  "sudo wipefs -a <LONGHORN_DISK_DEVICE> && sudo rm -rf <LONGHORN_DISK_PATH> && echo 'disk wiped'"
 ```
-Read `environment-values/my-okd-capm3/values.yaml` for the `longhorn_disk_config[].path` and `LONGHORN_DISK_DEVICE` values.
+
+If SSH is unreachable (node already down), skip — the `longhorn-okd-disk-sno` unit handles disk setup.
 
 3. **Remove stale kubeconfig**:
 ```bash
@@ -63,48 +100,19 @@ rm -f ~/sylva-core/management-cluster-kubeconfig
 
 ```bash
 cd ~/sylva-core
-./bootstrap.sh environment-values/my-okd-capm3
+BOOTSTRAP_WATCH_TIMEOUT_MIN=$WATCH_TIMEOUT MGMT_WATCH_TIMEOUT_MIN=$WATCH_TIMEOUT ./bootstrap.sh environment-values/my-okd-capm3
 ```
 
-This runs for ~45-90 minutes. Background the command and monitor it.
-
-### Monitor deployment
-
-The deployment goes through these phases:
-1. **KIND bootstrap** (~2 min) — creates local KIND cluster
-2. **Flux + sylva-units-operator install** (~3 min)
-3. **Bootstrap units** (~15 min) — metal3/ironic, MCE, assisted-installer, os-image-server
-4. **BMH provisioning** (~20 min) — node inspection, ISO boot, OKD install
-5. **Pivot** (~10 min) — `clusterctl move` from KIND → management
-6. **Management units** (~20 min) — keycloak, vault, longhorn, crossplane, etc.
-7. **`display_final_messages`** — prints "Sylva is ready" and "All done"
-
-While running, periodically check status. See `scripts/check-cluster-health.sh` for the health check procedure.
-
-**When the deploy fails** (the script exits non-zero or a kustomization is stuck):
-1. Run the health check to identify the failure
-2. Follow the diagnosis flow in Step 3
-3. Apply the fix, commit
-4. If bootstrap failed → re-run `./bootstrap.sh environment-values/my-okd-capm3`
-5. If post-pivot management failed → run `./apply.sh environment-values/my-okd-capm3`
-6. Repeat until "All done"
+Background the command and follow the active monitoring procedure below.
 
 ## Step 2B: Repair (fix existing cluster)
 
 ### Detect current state
 
-Determine what exists:
-
 ```bash
-# Bootstrap KIND cluster?
 kind get clusters 2>/dev/null | grep sylva
-
-# Management kubeconfig available?
 ls -la ~/sylva-core/management-cluster-kubeconfig
-
-# Management cluster reachable?
-export KUBECONFIG=~/sylva-core/management-cluster-kubeconfig
-oc get nodes
+export KUBECONFIG=~/sylva-core/management-cluster-kubeconfig && oc get nodes
 ```
 
 Based on state:
@@ -113,25 +121,96 @@ Based on state:
 - **No KIND, management reachable** → post-pivot, management is running
 - **Neither exists** → need full redeploy
 
-### Check for failures
+Then follow diagnosis (Step 4) and fix loop (Step 5).
 
-Run the health check script, then follow diagnosis (Step 3).
+## Step 3: Active Monitoring (during deploy)
 
-## Step 3: Diagnosis Flow
+### Phase tracking
 
-### 3.1 Check Flux kustomizations
+The deployment goes through these phases:
+1. **KIND bootstrap** (~2 min)
+2. **Flux + sylva-units-operator** (~3 min)
+3. **Bootstrap units** (~15 min) — metal3/ironic, MCE, assisted-installer
+4. **BMH provisioning + OKD install** (~20-30 min)
+5. **Pivot** (~10 min)
+6. **Management units** (~20 min)
+7. **"Sylva is ready" + "All done"**
+
+### 3a. Monitor OKD cluster install via ACI events
+
+Once the BMH reaches `provisioning` or `provisioned` state, start watching the ACI events:
 
 ```bash
-# On whichever cluster is relevant (bootstrap or management)
+# Get the ACI eventsURL
+EVENTS_URL=$(kubectl get aci ${CLUSTER_NAME}-control-plane -n sylva-system -o yaml | grep -i eventsURL | cut -d':' -f2-)
+curl -k $EVENTS_URL | jq .
+```
+
+Poll this every 2-3 minutes. Key events to watch for:
+- `"All is well"` → OKD install progressing normally
+- Errors about `bootstrap`, `etcd`, `api` → install issues
+- Once install completes, the ACI state transitions to `installing` → `installed`
+
+### 3b. Watch kustomization convergence — proactive diagnosis
+
+While `bootstrap.sh` or `apply.sh` is running, periodically check kustomization health:
+
+```bash
+# Get all non-ready kustomizations with their age
+kubectl get kustomizations.kustomize.toolkit.fluxcd.io -n sylva-system --no-headers | awk '$3 != "True"'
+```
+
+**For any kustomization stuck >15 minutes:**
+
+1. Check its status message:
+```bash
+kubectl get kustomization <name> -n sylva-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}'
+```
+
+2. If `DependencyNotReady` — trace the dependency:
+```bash
+# What is it waiting for?
+kubectl get kustomization <name> -n sylva-system -o jsonpath='{.spec.dependsOn}'
+# Check the blocking dependency's status
+kubectl get kustomization <blocking-dep> -n sylva-system
+```
+
+3. If `HealthCheckFailed` — check the underlying resource:
+```bash
+# The message tells you what resource is failing health check
+# e.g. "timeout waiting for: [HelmRelease/sylva-system/foo status: 'InProgress']"
+kubectl get helmrelease <name> -n sylva-system -o jsonpath='{.status.conditions[0].message}'
+# Check pods in the target namespace
+kubectl get pods -n <target-namespace> | grep -v Running
+```
+
+4. If the root cause is identifiable and a fix is needed:
+   - Echo the issue and proposed fix to the user
+   - Example: "Kustomization `longhorn` stuck >15m: blocked by `longhorn-okd-disk-sno` which is waiting for MCP reboot. This is expected — MCP reboots take ~15 min on bare metal."
+   - Example: "Kustomization `keycloak-init` stuck >15m: SCC violation on kube-job pod. Fix: add namespace to kube-job SCC."
+
+5. **Expected long waits** (do NOT flag these as issues):
+   - `cluster` waiting for OACP (OKD install ~20-30 min)
+   - `cluster-machines-ready` waiting for machine Ready (follows OACP)
+   - `longhorn-okd-disk-sno` / `longhorn` during MCP reboot (~15 min)
+   - `pivot` waiting for `management-sylva-units-ready`
+   - `capi-providers-pivot-ready` waiting for CAPI providers on management
+
+6. **Unexpected long waits** (flag these):
+   - Any HelmRelease in `InstallFailed` or `UpgradeFailed`
+   - Pods in `CrashLoopBackOff`, `ImagePullBackOff`, `Error`
+   - SCC violations (`FailedCreate` events)
+   - Dependency loops (A waits for B, B waits for A)
+
+## Step 4: Diagnosis Flow
+
+### 4.1 Check Flux kustomizations
+
+```bash
 flux get kustomizations -n sylva-system | grep -v "True"
 ```
 
-Look for `False` or `Unknown` status. Common patterns:
-- **Health check timeout** → a downstream resource is stuck
-- **Reconciliation in progress** → still converging (wait 2-3 min, recheck)
-- **dependency ... is not ready** → upstream unit is blocking
-
-### 3.2 Check failing HelmReleases
+### 4.2 Check failing HelmReleases
 
 ```bash
 flux get helmreleases -n sylva-system | grep -v "True"
@@ -142,38 +221,32 @@ For each failing HR:
 oc describe helmrelease <name> -n sylva-system | tail -30
 ```
 
-### 3.3 Check pods
+### 4.3 Check pods
 
 ```bash
 oc get pods -A | grep -v "Running\|Completed\|Succeeded" | grep -v "NAMESPACE"
 ```
 
-For failing pods:
-```bash
-oc describe pod <pod> -n <ns> | tail -30
-oc logs <pod> -n <ns> --tail=50
-```
-
-### 3.4 Check events
+### 4.4 Check events
 
 ```bash
 oc get events -A --sort-by='.lastTimestamp' | grep -i "error\|fail\|warning" | tail -20
 ```
 
-### 3.5 Check CAPI objects (if pivot-related)
+### 4.5 Check CAPI objects (if pivot-related)
 
 ```bash
 oc get cluster,machine,bmh,metal3machine -n sylva-system
 oc get openshiftassistedcontrolplane -n sylva-system
 ```
 
-### 3.6 Check SCC issues (OKD-specific)
+### 4.6 Check SCC issues (OKD-specific)
 
 ```bash
 oc get events -A --field-selector reason=FailedCreate | grep -i "scc\|security"
 ```
 
-## Step 4: Apply Fix
+## Step 5: Apply Fix
 
 1. Identify the root cause from diagnosis
 2. Check [known-issues.md](known-issues.md) for previously encountered issues
@@ -186,16 +259,15 @@ git commit -m "<descriptive message>"
 ```
 5. **Ask the user before pushing**: "Fix committed locally. Push to origin?"
 6. Re-run the appropriate script:
-   - Pre-pivot issue → `./bootstrap.sh environment-values/my-okd-capm3`
-   - Post-pivot issue → `./apply.sh environment-values/my-okd-capm3`
+   - Pre-pivot issue → `BOOTSTRAP_WATCH_TIMEOUT_MIN=$WATCH_TIMEOUT MGMT_WATCH_TIMEOUT_MIN=$WATCH_TIMEOUT ./bootstrap.sh environment-values/my-okd-capm3`
+   - Post-pivot issue → `APPLY_WATCH_TIMEOUT_MIN=$WATCH_TIMEOUT ./apply.sh environment-values/my-okd-capm3`
 
-## Step 5: Retry Loop
+## Step 6: Retry Loop
 
 After applying a fix and re-running:
-1. Monitor the deployment (background the script)
-2. Periodically run health checks
-3. If a new failure appears, go back to Step 3
-4. Continue until `display_final_messages` prints "All done"
+1. Resume active monitoring (Step 3)
+2. If a new failure appears, go back to Step 4
+3. Continue until `display_final_messages` prints "All done"
 
 ## Key Files
 

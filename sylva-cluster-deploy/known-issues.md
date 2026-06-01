@@ -80,13 +80,16 @@ mgmt_kubectl annotate bmh --all baremetalhost.metal3.io/paused- -n $RELEASE_NAME
 ### OACP stuck in "Installing" after pivot (status not transferred)
 
 **Symptom**: OACP shows `Available=False`, ACI stuck in `pending-for-input`, Cluster shows `ControlPlaneInitialized=False`.  
-**Root cause**: `clusterctl move` creates objects without status subresource. OACP controller can't detect cluster is already installed.  
-**Fix** (already in `pivot.sh`): Patch OACP and Cluster status after move:
-```bash
-# Patch OACP: set Ready, MachinesReady, KubeconfigAvailable, replicas
-# Patch Cluster: set ControlPlaneInitialized=True
-```
-See `pivot.sh` for full patch commands.
+**Root cause**: `clusterctl move` creates objects without status subresource. OACP controller reads ACI status and overwrites any OACP status patches.  
+**Critical**: Patching OACP status alone is NOT sufficient — the OACP controller will overwrite it based on ACI state. Must also patch ClusterDeployment and ACI.  
+**Fix** (in `pivot.sh`): Three-level patch after move:
+1. `ClusterDeployment.spec.installed=true` — tells assisted-installer the cluster exists
+2. ACI status: `Completed=True`, `RequirementsMet=True`, `Validated=True`
+3. OACP status: `Available=True`, `Ready=True`, `MachinesReady=True`, `KubeconfigAvailable=True`
+4. Cluster status: `ControlPlaneInitialized=True`
+
+The ClusterDeployment patch is the key — without it, the assisted-installer controller treats the moved ACI as a new install request and the OACP controller overwrites status patches.  
+**File**: `charts/sylva-units/scripts/pivot.sh`
 
 ### externallyProvisioned incompatible with CAPM3
 
@@ -123,6 +126,20 @@ groups:
 1. **Sylva-side**: Gate values on `bootstrap_provider == "cabpoa"` in `charts/sylva-units/values.yaml`
 2. **Chart-side** (preferred): Add `isOCP` helper using `lookup "v1" "Namespace" "" "openshift-config"`
 **File**: `charts/sylva-units/values.yaml` → `okd-openshift-mce` unit values
+
+### Longhorn unit timeout during MCP reboot (per-unit sylvactl timeout)
+
+**Symptom**: `bootstrap.sh` exits with `Unit timeout exceeded: unit Kustomization/longhorn did not become ready after 5m0s`. The `longhorn-okd-disk-sno` MachineConfig triggers an MCP reboot (~10-15 min), and `longhorn` depends on `longhorn-okd-disk-sno`.  
+**Root cause**: `longhorn-okd-disk-sno` has `sylvactl/unitTimeout: 45m` but `longhorn` itself has the default 5m. When sylvactl hits a per-unit timeout, it exits the entire script.  
+**Fix**: Add `sylvactl/unitTimeout: 45m` to the `longhorn` unit in environment values:
+```yaml
+# environment-values/my-okd-capm3/values.yaml
+units:
+  longhorn:
+    annotations:
+      sylvactl/unitTimeout: 45m
+```
+**Note**: This is an env-values change (local), not a chart change. The MCP reboot is expected — do not flag `longhorn` or `longhorn-okd-disk-sno` as stuck during this window.
 
 ### Longhorn disk precheck timeout (upgrade-only units)
 
