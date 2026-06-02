@@ -1,19 +1,21 @@
 ---
 name: sylva-cluster-deploy
 description: >-
-  Deploy, repair, and redeploy Sylva OKD management clusters on bare metal (cabpoa/capm3).
+  Deploy, repair, upgrade, and redeploy Sylva OKD management clusters on bare metal (cabpoa/capm3).
   Runs bootstrap.sh or apply.sh, monitors Flux kustomizations, diagnoses failures,
   applies code fixes, commits, and retries until all units are ready.
-  Use when the user mentions deploying, repairing, redeploying, or troubleshooting
+  Use when the user mentions deploying, repairing, redeploying, upgrading,
+  enabling/disabling units, version upgrades, or troubleshooting
   a Sylva management cluster, OKD cluster, or pivot issues.
 ---
 
-# Sylva Cluster Deploy & Repair
+# Sylva Cluster Deploy, Apply & Repair
 
 ## Overview
 
 This skill manages the full lifecycle of a Sylva OKD management cluster:
-- **Redeploy**: Tear down existing state and deploy from scratch
+- **Redeploy**: Tear down existing state and deploy from scratch (`bootstrap.sh`)
+- **Upgrade**: Push changes to an already-deployed cluster (`apply.sh`) — enable/disable units, upgrade versions, change config
 - **Repair**: Diagnose failures on a running cluster, apply fixes, and retry
 
 The cluster uses `bootstrap_provider: cabpoa` and `infra_provider: capm3` (bare metal with assisted installer).
@@ -40,7 +42,8 @@ Present defaults and let the user confirm or override:
 ### 1a. Mode
 
 ```
-Repair  — Detect current state, find failures, fix code, commit, retry
+Upgrade  — Push changes to a running cluster (enable/disable units, version upgrades, config changes)
+Repair   — Detect current state, find failures, fix code, commit, retry
 Redeploy — Clean teardown + fresh bootstrap.sh from scratch
 ```
 
@@ -126,6 +129,102 @@ Based on state:
 - **Neither exists** → need full redeploy
 
 Then follow diagnosis (Step 4) and fix loop (Step 5).
+
+## Step 2C: Upgrade (update existing cluster)
+
+Use `apply.sh` whenever the management cluster is already deployed and you need to make changes:
+- Enable or disable units (edit `environment-values/my-okd-capm3/values.yaml`)
+- Upgrade OKD or chart versions
+- Change configuration values (replicas, timeouts, feature flags, etc.)
+- Add new source_templates or registry mirrors
+
+### Workflow
+
+1. **Verify the cluster is reachable**:
+```bash
+export KUBECONFIG=~/sylva-core/management-cluster-kubeconfig
+oc get nodes
+```
+
+2. **Edit the local environment values file** directly — `environment-values/my-okd-capm3/values.yaml`.
+
+   Common examples:
+   - **Enable a unit**: set `units.<unit-name>.enabled: true` (or remove the `enabled: false` line)
+   - **Disable a unit**: set `units.<unit-name>.enabled: false`
+   - **Upgrade OKD version**: update `cluster.openshift.version`
+   - **Change chart version**: update the relevant `source_templates` tag
+   - **Tune values**: modify `units.<unit-name>.helmrelease_spec.values` or `kustomization_spec.postBuild.substitute`
+
+3. **Commit and push**:
+```bash
+cd ~/sylva-core
+git add -A
+git commit -m "<descriptive message>"
+git push
+```
+
+4. **Run apply.sh** in a tmux session:
+```bash
+tmux kill-session -t sylva-deployment 2>/dev/null
+tmux new-session -d -s sylva-deployment \
+  "cd ~/sylva-core && source bin/env && unset KUBECONFIG && APPLY_WATCH_TIMEOUT_MIN=$WATCH_TIMEOUT ./apply.sh environment-values/my-okd-capm3 2>&1 | tee apply.log; exec bash"
+```
+
+5. Follow active monitoring (Step 3) — `apply.sh` uses the same `sylvactl watch` mechanism.
+
+### What apply.sh does
+
+- Detects `management-cluster-kubeconfig` and uses it automatically
+- Ensures Flux and sylva-units-operator are running
+- Applies the updated SylvaUnitsRelease to the cluster
+- Watches kustomizations until `sylva-units-status` is ready
+- Default timeout: `APPLY_WATCH_TIMEOUT_MIN=20` (shorter than bootstrap since only changed units reconcile)
+
+### Failure loop for newly enabled units
+
+When enabling a new unit, `apply.sh` will often fail on the first attempt. Follow this loop:
+
+1. **Monitor apply.sh** — watch for kustomization/HelmRelease failures on the newly enabled unit.
+
+2. **Diagnose the failure** — common root causes for new units on OKD:
+   - **SCC (SecurityContextConstraints)** — pods fail with `FailedCreate` due to missing SCC permissions. Check:
+     ```bash
+     oc get events -A --field-selector reason=FailedCreate | grep -i "scc\|security"
+     oc get pods -A | grep -v "Running\|Completed\|Succeeded" | head -20
+     ```
+   - **Missing CRDs** — the unit depends on a CRD not yet installed
+   - **Image pull errors** — registry mirror missing or image tag wrong
+   - **Resource conflicts** — namespace or resource name collisions
+   - **Dependency issues** — unit depends on another unit that isn't enabled
+
+3. **Kill the stuck apply.sh**:
+   ```bash
+   tmux kill-session -t sylva-deployment
+   ```
+
+4. **Fix the root cause** in the codebase (e.g. add SCC, fix chart values, add dependency).
+
+5. **Commit and push the fix**:
+   ```bash
+   cd ~/sylva-core
+   git add -A
+   git commit -m "<fix description>"
+   git push
+   ```
+
+6. **Re-run apply.sh**:
+   ```bash
+   tmux new-session -d -s sylva-deployment \
+     "cd ~/sylva-core && source bin/env && unset KUBECONFIG && APPLY_WATCH_TIMEOUT_MIN=$WATCH_TIMEOUT ./apply.sh environment-values/my-okd-capm3 2>&1 | tee apply.log; exec bash"
+   ```
+
+7. **Repeat** until `apply.sh` prints "All done".
+
+### Notes
+
+- `apply.sh` is idempotent — safe to re-run after killing and fixing
+- Only changed units reconcile; unchanged units stay as-is
+- The diagnosis flow (Step 4) and fix flow (Step 5) also apply here
 
 ## Step 3: Active Monitoring (during deploy)
 
@@ -286,7 +385,7 @@ After applying a fix and re-running:
 | File | Purpose |
 |------|---------|
 | `bootstrap.sh` | Full deploy: KIND → bootstrap → pivot → management |
-| `apply.sh` | Update/retry on existing management cluster |
+| `apply.sh` | Apply changes to existing cluster (enable/disable units, upgrades, config) |
 | `charts/sylva-units/scripts/pivot.sh` | Pivot logic (clusterctl move, cabpoa patches) |
 | `charts/sylva-units/values.yaml` | Unit definitions, dependencies, default values |
 | `charts/sylva-units/bootstrap.values.yaml` | Bootstrap-only value overrides |
