@@ -66,12 +66,13 @@ Evaluate the change against these criteria:
 
 | # | Check | Question |
 |---|-------|----------|
-| 1 | **Purpose alignment** | Does every changed file directly relate to the stated issue? |
-| 2 | **Completeness** | Does the change fully address the issue, or is something missing? |
-| 3 | **Scope limitation** | Are there modifications unrelated to the issue (scope creep, accidental edits, debug leftovers)? |
-| 4 | **No regressions** | Could the change break an existing unit, dependency, or deployment step? |
-| 5 | **Commit message quality** | Does the commit message accurately describe the change? |
-| 6 | **History consistency** | Based on the log, does this change conflict with or revert a previous fix? Is the same issue being fixed repeatedly without progress? |
+| 1 | **No local env files** | Does the commit include any local environment files? If yes, **REJECT immediately**. These must never be committed. Look for: `environment-values/*`, `*kubeconfig*`, `.env`. |
+| 2 | **Purpose alignment** | Does every changed file directly relate to the stated issue? |
+| 3 | **Completeness** | Does the change fully address the issue, or is something missing? |
+| 4 | **Scope limitation** | Are there modifications unrelated to the issue (scope creep, accidental edits, debug leftovers)? |
+| 5 | **No regressions** | Could the change break an existing unit, dependency, or deployment step? |
+| 6 | **Commit message quality** | Does the commit message accurately describe the change? |
+| 7 | **History consistency** | Based on the log, does this change conflict with or revert a previous fix? Is the same issue being fixed repeatedly without progress? |
 
 ### Step 3: Decision
 

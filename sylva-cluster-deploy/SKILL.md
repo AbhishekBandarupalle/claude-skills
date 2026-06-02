@@ -54,17 +54,37 @@ The code-validate agent reads this before reviewing your commit, and appends
 its own review notes (approvals, rejections, contradictions). **Read this file
 before each new fix attempt** to recall prior decisions and reviewer feedback.
 
+## Local Environment Files — Never Commit
+
+Changes to local environment files are **local only** — never stage, commit,
+or push them. These files contain site-specific configuration (node IPs,
+credentials, disk paths) that only apply to this deployment.
+
+**Local env files (never commit):**
+- `environment-values/*` (anything under this directory, any environment)
+- `*kubeconfig*` (any file with kubeconfig in the name)
+- `.env`
+
+When the user asks to enable a unit, disable a unit, change a version, or
+modify environment values, **edit the file locally but do not commit it**.
+The change takes effect when `apply.sh` runs — it reads the local working tree.
+
+Only commit changes to shared codebase files: `charts/`, `kustomize-units/`,
+`tools/`, etc.
+
 ## Commit & Push Procedure (used by all steps)
 
 Every time you need to commit and push code changes, follow this procedure
 instead of pushing directly. This applies to **all** commit points in the
 skill (Upgrade, Repair fix loop, Apply Fix, etc.).
 
-1. **Stage and commit** (do NOT push yet):
+1. **Stage and commit** (do NOT push yet) — stage only the relevant
+   codebase files, **never** local env files:
 
 ```bash
 cd ~/sylva-core
-git add -A
+git add charts/ kustomize-units/ tools/
+git diff --cached --name-only | grep -E 'environment-values/|kubeconfig|\.env' && echo "ERROR: local env files staged!" && git reset HEAD && exit 1
 git commit -m "<descriptive message about the issue and fix>"
 ```
 
