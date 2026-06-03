@@ -4,21 +4,39 @@ Cursor agent skills for Sylva infrastructure automation.
 
 ## Skills
 
+### learn-sylva-units
+
+Deep-dive into what a Sylva unit does across all cluster distributions (RKE2, OKD, etc.). Investigates unit definitions, resources, dependencies, Kyverno policies, and cross-distribution behavior. Automatically calls **suggest-adaptation** when done.
+
+```
+learn-sylva-units/
+└── SKILL.md
+```
+
+---
+
+### suggest-adaptation
+
+Proposes adaptation paths for enabling a Sylva unit on OKD/OCP. Takes the Learn output, identifies blockers, generates multiple options (add SCCs, use OpenShift-native, hybrid, disable), and presents them for the user to choose. Automatically calls **sylva-cluster-deploy** after the user picks.
+
+```
+suggest-adaptation/
+└── SKILL.md
+```
+
+---
+
 ### sylva-cluster-deploy
 
-Deploy, repair, upgrade, and redeploy Sylva OKD management clusters on bare metal (cabpoa/capm3). Runs bootstrap.sh or apply.sh, monitors Flux kustomizations, diagnoses failures, applies code fixes, and retries until all units are ready.
+Deploy, repair, and redeploy Sylva OKD management clusters on bare metal (cabpoa/capm3). Also the final step in the Learn → Suggest → Deploy pipeline. All code changes go through **code-validate** before being pushed.
 
 **Capabilities:**
 
 - Full redeploy from scratch (teardown + bootstrap.sh)
 - Repair mode (diagnose failures, apply fixes, retry)
-- Upgrade mode (enable/disable units, version upgrades, config changes via apply.sh)
 - Active monitoring of kustomizations, HelmReleases, pods, and ACI events
 - Known issue catalog with tested fixes
-- Health check script for quick status assessment
 - Automatic retry loop until all Sylva units are ready
-
-All code changes go through the **code-validate** agent before being pushed.
 
 ```
 sylva-cluster-deploy/
@@ -53,50 +71,63 @@ code-validate/
 
 ## Shared Agent Memory
 
-Both agents read and write shared files in `~/sylva-core/`:
+All agents read and write shared files in `~/sylva-core/`:
 
-
-| File                    | Purpose                                                                                    | Writers       |
-| ----------------------- | ------------------------------------------------------------------------------------------ | ------------- |
-| `.agent-session.md`     | Shared memory — session goal, fix attempts with reasoning, review notes from code-validate | Both          |
-| `.code-validate-log.md` | Clean audit trail of approved commits only                                                 | code-validate |
-
+| File | Purpose | Writers |
+|------|---------|---------|
+| `.agent-session.md` | Shared memory — session goal, learn summaries, adaptation decisions, fix attempts, review notes | All agents |
+| `.code-validate-log.md` | Clean audit trail of approved commits only | code-validate |
 
 ## Architecture
 
-Two-agent system for deploying and validating code changes on Sylva OKD management clusters.
+Four-agent system for understanding, adapting, deploying, and validating Sylva units on OKD clusters.
 
-### Workflow
+### Agent Pipeline
 
 ```mermaid
 flowchart TD
-    User([User]):::user -->|triggers deploy / repair / upgrade| ReadEnv
+    User([User]):::user -->|what does unit X do / enable unit X on OKD| Learn
+
+    subgraph learn ["learn-sylva-units"]
+        Learn[Investigate Unit<br/><i>definition, resources, deps,<br/>Kyverno policies, RKE2 vs OKD</i>]
+        Summary[Write Summary<br/><i>to .agent-session.md</i>]
+        Learn --> Summary
+    end
+
+    subgraph suggest ["suggest-adaptation"]
+        ReadCtx[Read Learn Summary<br/><i>from .agent-session.md</i>]
+        Blockers[Identify Blockers<br/><i>SCCs, CNI, images, APIs...</i>]
+        Options[Generate Paths<br/><i>A: add SCCs  B: use OKD-native<br/>C: disable  D: hybrid</i>]
+        UserPick[/User Picks Option/]
+        RecordDecision[Record Decision<br/><i>to .agent-session.md</i>]
+        ReadCtx --> Blockers --> Options --> UserPick --> RecordDecision
+    end
 
     subgraph deploy ["sylva-cluster-deploy"]
-        ReadEnv[Read Environment<br/><i>cluster name, node IP, disk config</i>]
-        InitSession[Init Session Context<br/><i>write goal + mode to .agent-session.md</i>]
-        Diagnose[Diagnose / Fix<br/><i>monitor cluster, trace failures, edit code</i>]
-        WriteCtx[Write Fix Attempt<br/><i>append problem + approach to .agent-session.md</i>]
-        Commit[git add + commit<br/><i>stage and commit locally, no push</i>]
-        CallCV[Call code-validate sub-agent]
+        ReadDecision[Read Adaptation Decision<br/><i>from .agent-session.md</i>]
+        Implement[Implement Changes<br/><i>edit charts, kustomize, SCCs...</i>]
+        WriteAttempt[Write Fix Attempt<br/><i>to .agent-session.md</i>]
+        Commit[git add + commit<br/><i>no push yet</i>]
+        CallCV[Call code-validate]
         Push[git push]
-        Revise[Revise or Justify<br/><i>fix code or re-submit with JUSTIFICATION</i>]
-        RunScript[Run bootstrap / apply<br/><i>deploy changes via tmux</i>]
+        Revise[Revise or Justify]
+        RunScript[Run apply.sh / bootstrap.sh]
 
-        ReadEnv --> InitSession --> Diagnose --> WriteCtx --> Commit --> CallCV
+        ReadDecision --> Implement --> WriteAttempt --> Commit --> CallCV
     end
 
     subgraph validate ["code-validate"]
-        ReadShared[Read Shared Memory<br/><i>.agent-session.md + .code-validate-log.md</i>]
-        ReadDiff[Read Commit + Diff<br/><i>git log + git diff</i>]
-        Review[Review Against 7 Criteria<br/><i>env files, purpose, scope, regressions, history...</i>]
-        Decision{Decision}
-        WriteReview[Write Review Notes<br/><i>append verdict to .agent-session.md</i>]
+        ReadAll[Read Shared Memory<br/><i>.agent-session.md +<br/>.code-validate-log.md</i>]
+        ReviewDiff[Review Commit + Diff<br/><i>7 criteria</i>]
+        Decision{Verdict}
+        WriteReview[Write Review Notes<br/><i>to .agent-session.md</i>]
 
-        ReadShared --> ReadDiff --> Review --> Decision
+        ReadAll --> ReviewDiff --> Decision
     end
 
-    CallCV --> ReadShared
+    Summary -->|auto-calls| ReadCtx
+    RecordDecision -->|auto-calls| ReadDecision
+    CallCV -->|auto-calls| ReadAll
 
     Decision -->|APPROVED| WriteReview
     Decision -->|CONTRADICTION| WriteReview
@@ -106,13 +137,15 @@ flowchart TD
     WriteReview -->|CONTRADICTION / REJECTED| Revise
 
     Push --> RunScript
-    RunScript -->|new failure| Diagnose
+    RunScript -->|new failure| Implement
     Revise -->|re-commit| Commit
 
-    classDef user fill:#166534,color:#fff,stroke:#22c55e
+    classDef user fill:#334155,color:#e2e8f0,stroke:#94a3b8
     classDef default fill:#1e293b,color:#e2e8f0,stroke:#334155
+    style learn fill:none,stroke:#ef4444,stroke-width:2px,color:#f87171
+    style suggest fill:none,stroke:#eab308,stroke-width:2px,color:#facc15
     style deploy fill:none,stroke:#3b82f6,stroke-width:2px,color:#60a5fa
-    style validate fill:none,stroke:#a855f7,stroke-width:2px,color:#c084fc
+    style validate fill:none,stroke:#22c55e,stroke-width:2px,color:#4ade80
 ```
 
 ### Shared Memory
@@ -120,22 +153,29 @@ flowchart TD
 ```mermaid
 flowchart LR
     subgraph files ["Shared Files in ~/sylva-core/"]
-        Session[".agent-session.md<br/><i>session goal, fix attempts,<br/>review notes, decisions</i>"]
+        Session[".agent-session.md<br/><i>learn summaries, adaptation decisions,<br/>fix attempts, review notes</i>"]
         Log[".code-validate-log.md<br/><i>clean audit trail of<br/>approved commits only</i>"]
     end
 
-    Deploy([sylva-cluster-deploy]):::deploy
-    Validate([code-validate]):::validate
+    LearnAgent([learn-sylva-units]):::learn
+    SuggestAgent([suggest-adaptation]):::suggest
+    DeployAgent([sylva-cluster-deploy]):::deploy
+    ValidateAgent([code-validate]):::validate
 
-    Deploy -->|writes session header,<br/>fix attempt entries| Session
-    Deploy -.->|reads prior decisions<br/>+ reviewer feedback| Session
-    Validate -->|writes review entries<br/>for all verdicts| Session
-    Validate -.->|reads session goal<br/>+ fix context| Session
-    Validate -->|writes approved<br/>commit entries| Log
-    Validate -.->|reads commit history<br/>for contradiction check| Log
+    LearnAgent -->|writes unit<br/>summary| Session
+    SuggestAgent -.->|reads learn<br/>summary| Session
+    SuggestAgent -->|writes adaptation<br/>decision| Session
+    DeployAgent -.->|reads decision<br/>+ prior feedback| Session
+    DeployAgent -->|writes fix<br/>attempt entries| Session
+    ValidateAgent -.->|reads full<br/>session context| Session
+    ValidateAgent -->|writes review<br/>notes for all verdicts| Session
+    ValidateAgent -->|writes approved<br/>commit entries| Log
+    ValidateAgent -.->|reads commit<br/>history| Log
 
+    classDef learn fill:#450a0a,color:#fca5a5,stroke:#ef4444
+    classDef suggest fill:#422006,color:#fde047,stroke:#eab308
     classDef deploy fill:#1e3a5f,color:#93c5fd,stroke:#3b82f6
-    classDef validate fill:#2e1065,color:#d8b4fe,stroke:#a855f7
+    classDef validate fill:#052e16,color:#86efac,stroke:#22c55e
     style files fill:none,stroke:#eab308,stroke-width:2px,color:#facc15
 ```
 
@@ -167,6 +207,8 @@ git clone https://github.com/AbhishekBandarupalle/claude-skills.git ~/claude-ski
 If using Cursor, add symlinks for Cursor:
 
 ```bash
+ln -s ~/claude-skills/learn-sylva-units ~/.cursor/skills/learn-sylva-units
+ln -s ~/claude-skills/suggest-adaptation ~/.cursor/skills/suggest-adaptation
 ln -s ~/claude-skills/sylva-cluster-deploy ~/.cursor/skills/sylva-cluster-deploy
 ln -s ~/claude-skills/code-validate ~/.cursor/skills/code-validate
 ```
@@ -174,6 +216,8 @@ ln -s ~/claude-skills/code-validate ~/.cursor/skills/code-validate
 If using Claude Code, add symlinks for Claude:
 
 ```bash
+ln -s ~/claude-skills/learn-sylva-units ~/.claude/learn-sylva-units
+ln -s ~/claude-skills/suggest-adaptation ~/.claude/suggest-adaptation
 ln -s ~/claude-skills/sylva-cluster-deploy ~/.claude/sylva-cluster-deploy
 ln -s ~/claude-skills/code-validate ~/.claude/code-validate
 ```

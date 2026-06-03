@@ -4,6 +4,7 @@ description: >-
   Deploy, repair, and redeploy Sylva OKD management clusters on bare metal (cabpoa/capm3).
   Runs bootstrap.sh or apply.sh, monitors Flux kustomizations, diagnoses failures,
   applies code fixes, commits, and retries until all units are ready.
+  Also the final step in the Learn → Suggest → Deploy pipeline for adapting units to OKD.
   Use when the user mentions deploying, repairing, redeploying, or troubleshooting
   a Sylva management cluster, OKD cluster, or pivot issues.
 ---
@@ -15,6 +16,9 @@ description: >-
 This skill manages the full lifecycle of a Sylva OKD management cluster:
 - **Redeploy**: Tear down existing state and deploy from scratch
 - **Repair**: Diagnose failures on a running cluster, apply fixes, and retry
+
+Also serves as the final step in the Learn → Suggest → Deploy pipeline for
+adapting units to OKD.
 
 The cluster uses `bootstrap_provider: cabpoa` and `infra_provider: capm3` (bare metal with assisted installer).
 
@@ -130,6 +134,17 @@ prompt: |
 
 **Never push without an APPROVED verdict from code-validate.**
 
+## Learn → Suggest → Deploy Pipeline
+
+When enabling a unit that wasn't designed for OKD, use the three-agent chain:
+
+1. **Learn** (`learn-sylva-units`) — investigates the unit across distributions
+2. **Suggest** (`suggest-adaptation`) — proposes OKD adaptation paths, user picks one
+3. **Deploy** (this skill) — implements the chosen path, commits, validates, pushes
+
+Each agent automatically calls the next. This skill is the final step — it
+receives the adaptation decision from `.agent-session.md` and implements it.
+
 ## Step 0: Read Environment
 
 Before asking anything, read `environment-values/my-okd-capm3/values.yaml` and extract:
@@ -171,8 +186,9 @@ Present defaults and let the user confirm or override:
 ### 1a. Mode
 
 ```
-Repair  — Detect current state, find failures, fix code, commit, retry
+Repair   — Detect current state, find failures, fix code, commit, retry
 Redeploy — Clean teardown + fresh bootstrap.sh from scratch
+Learn    — Deep-dive into what a unit does (resources, dependencies, policies, impact)
 ```
 
 ### 1b. Configuration (show defaults, ask if user wants to change)
