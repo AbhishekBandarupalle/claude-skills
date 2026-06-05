@@ -1,4 +1,4 @@
-# Claude Skills
+# Cursor Agent Skills
 
 Cursor agent skills for Sylva infrastructure automation.
 
