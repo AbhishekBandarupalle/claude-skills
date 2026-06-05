@@ -216,23 +216,20 @@ Git clone the repo to home directory:
 git clone https://github.com/AbhishekBandarupalle/claude-skills.git ~/claude-skills
 ```
 
-If using Cursor, add symlinks for Cursor:
+If using Cursor, add one symlink for the dispatcher only:
 
 ```bash
 ln -s ~/claude-skills/sylva ~/.cursor/skills/sylva
-ln -s ~/claude-skills/learn-and-suggest ~/.cursor/skills/learn-and-suggest
-ln -s ~/claude-skills/sylva-cluster-deploy ~/.cursor/skills/sylva-cluster-deploy
-ln -s ~/claude-skills/code-validate ~/.cursor/skills/code-validate
 ```
 
-If using Claude Code, add symlinks for Claude:
+If using Claude Code, add one symlink for the dispatcher only:
 
 ```bash
 ln -s ~/claude-skills/sylva ~/.claude/sylva
-ln -s ~/claude-skills/learn-and-suggest ~/.claude/learn-and-suggest
-ln -s ~/claude-skills/sylva-cluster-deploy ~/.claude/sylva-cluster-deploy
-ln -s ~/claude-skills/code-validate ~/.claude/code-validate
 ```
+
+Sub-agent skills (learn-and-suggest, sylva-cluster-deploy, code-validate) do not
+need symlinks. The `/sylva` dispatcher calls them by file path directly.
 
 Optionally set environment variables in your shell profile:
 

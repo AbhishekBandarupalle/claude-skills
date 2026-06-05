@@ -3,8 +3,8 @@ name: learn-and-suggest
 description: >-
   Investigate what a Sylva unit does across distributions (RKE2, OKD) and
   suggest OKD adaptation paths. Caches results for fast repeat lookups.
-  Use when the user asks what a unit does, wants to enable/adapt a unit on OKD,
-  or asks about unit dependencies.
+  Called by the /sylva dispatcher only.
+disable-model-invocation: true
 ---
 
 # Learn & Suggest
@@ -158,7 +158,7 @@ changes: <file list with action>
 subagent_type: generalPurpose
 description: "Deploy OKD adaptation for <unit>"
 prompt: |
-  Read the skill at /home/abhi/.cursor/skills/sylva-cluster-deploy/SKILL.md and follow it.
+  Read the skill at ~/claude-skills/sylva-cluster-deploy/SKILL.md and follow it.
   Working directory: ~/sylva-core
   Adaptation decision is in ~/sylva-core/.agent-session.md.
   Implement the changes: <list from chosen option>

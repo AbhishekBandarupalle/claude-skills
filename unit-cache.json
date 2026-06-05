@@ -1,0 +1,209 @@
+{
+  "sriov": {
+    "updated": "2026-06-05T11:42:00Z",
+    "type": "Kustomization",
+    "path": "dummy",
+    "phase": "management",
+    "enabled_on": [],
+    "description": "obsolete - replaced by sriov-network-operator; dummy unit for backward compatibility",
+    "namespace": null,
+    "resources": [],
+    "deps": ["dummy"],
+    "reverse_deps": ["sriov-network-operator"],
+    "kyverno_policies": [],
+    "gaps_okd": ["not applicable - obsolete unit"],
+    "blockers_okd": [],
+    "okd_adaptation": {
+      "enable_pattern": "sriov.enabled: true in env values triggers sriov-network-operator via backward-compat expression",
+      "note": "can also directly enable sriov-network-operator instead"
+    }
+  },
+  "sriov-crd": {
+    "updated": "2026-06-05T11:42:00Z",
+    "type": "HelmRelease",
+    "path": null,
+    "phase": "management",
+    "enabled_on": ["rke2", "rke2-capm3-single-node-edge"],
+    "description": "installs CRDs for SR-IOV Network operator",
+    "namespace": null,
+    "resources": ["CRDs for SriovNetworkNodePolicy, SriovNetwork, SriovNetworkNodeState, etc."],
+    "deps": ["base-deps", "multus-ready"],
+    "reverse_deps": ["sriov-kyverno-policies", "sriov-network-operator"],
+    "kyverno_policies": [],
+    "gaps_okd": [],
+    "blockers_okd": [],
+    "helm_repo_url": "https://suse-edge.github.io/charts/",
+    "helm_chart": "sriov-crd",
+    "helm_chart_version": "1.6.4+up1.6.0",
+    "kustomization_spec": {
+      "prune": false
+    },
+    "maturity": "stable",
+    "hidden": true,
+    "okd_adaptation": {
+      "depends_on_override": {
+        "multus-ready": false,
+        "multus": false
+      },
+      "reason": "OKD ships multus built-in; multus-ready unit is disabled so dependency must be removed to avoid blocking"
+    }
+  },
+  "sriov-init": {
+    "updated": "2026-06-05T11:33:00Z",
+    "type": "Kustomization",
+    "path": "./kustomize-units/namespace-defs/privileged-namespace",
+    "phase": "management",
+    "enabled_on": ["rke2", "rke2-capm3-single-node-edge"],
+    "description": "creates sriov requirements - creates the cattle-sriov-system namespace with privileged PSS labels",
+    "namespace": "cattle-sriov-system",
+    "resources": ["Namespace/cattle-sriov-system"],
+    "deps": ["base-deps"],
+    "reverse_deps": ["sriov-kyverno-policies", "sriov-network-operator", "sriov-resources"],
+    "kyverno_policies": [],
+    "gaps_okd": [],
+    "blockers_okd": [],
+    "internal": true
+  },
+  "sriov-kyverno-policies": {
+    "updated": "2026-06-05T11:33:00Z",
+    "type": "Kustomization",
+    "path": "./kustomize-units/kyverno-policies/sriov-network-operator",
+    "phase": "management",
+    "enabled_on": ["rke2", "rke2-capm3-single-node-edge"],
+    "description": "Kyverno policies specific to sriov-network-operator",
+    "namespace": "cattle-sriov-system",
+    "resources": [
+      "Policy/restart-sriov-operator-webhook-on-cert-change",
+      "Policy/inject-restart-annotation-into-operator-webhook-daemonset",
+      "Policy/sort-sriov-device-plugin-node-selectors"
+    ],
+    "deps": ["base-deps", "sriov-init", "sriov-crd", "kyverno"],
+    "reverse_deps": [],
+    "kyverno_policies": [
+      "restart-sriov-operator-webhook-on-cert-change: restarts operator-webhook DaemonSet when cert Secret changes",
+      "inject-restart-annotation-into-operator-webhook-daemonset: injects cert hash annotation on DaemonSet create/update",
+      "sort-sriov-device-plugin-node-selectors: sorts nodeSelector list to prevent unnecessary rollouts"
+    ],
+    "gaps_okd": [],
+    "blockers_okd": [],
+    "internal": true
+  },
+  "sriov-network-operator": {
+    "updated": "2026-06-05T11:33:00Z",
+    "type": "HelmRelease",
+    "path": null,
+    "phase": "management",
+    "enabled_on": ["rke2", "rke2-capm3-single-node-edge", "okd"],
+    "description": "installs SR-IOV operator from SUSE Edge charts (same operator on all distros)",
+    "namespace": "cattle-sriov-system",
+    "resources": [
+      "Deployment/sriov-network-operator",
+      "DaemonSet/sriov-network-config-daemon",
+      "DaemonSet/operator-webhook",
+      "DaemonSet/sriov-device-plugin"
+    ],
+    "deps": ["base-deps", "sriov-init", "sriov-crd", "kyverno"],
+    "reverse_deps": ["sriov-resources", "nvidia-gpu-operator"],
+    "kyverno_policies": ["sriov-kyverno-policies"],
+    "gaps_okd": [],
+    "blockers_okd": [],
+    "maturity": "stable",
+    "helm_repo_url": "https://suse-edge.github.io/charts/",
+    "helm_chart": "sriov-network-operator",
+    "helm_chart_version": "1.6.4+up1.6.0",
+    "enabled_expression": "{{ or (tuple . \"sriov\" | include \"unit-enabled\") (not (empty .Values.sriov.node_policies)) }}",
+    "helmrelease_values": {
+      "operator.admissionControllers.enabled": true,
+      "operator.admissionControllers.certificates.certManager.enabled": true,
+      "operator.admissionControllers.certificates.certManager.generateSelfSigned": true
+    },
+    "okd_adaptation": {
+      "helmrelease_values_override": {
+        "operator.cniBinPath": "/var/lib/cni/bin"
+      },
+      "reason": "RHCOS uses /var/lib/cni/bin instead of /opt/cni/bin"
+    }
+  },
+  "sriov-resources": {
+    "updated": "2026-06-05T11:33:00Z",
+    "type": "HelmRelease",
+    "path": null,
+    "phase": "management",
+    "enabled_on": ["rke2-capm3-single-node-edge"],
+    "description": "configures SRIOV resources (VFs) based on sriov.node_policies values",
+    "namespace": "cattle-sriov-system",
+    "resources": ["SriovNetworkNodePolicy/<per-policy>"],
+    "deps": ["base-deps", "sriov-init", "sriov-network-operator"],
+    "reverse_deps": [],
+    "kyverno_policies": [],
+    "gaps_okd": [],
+    "blockers_okd": [],
+    "internal": true,
+    "repo": "sriov-resources",
+    "repo_url": "https://gitlab.com/sylva-projects/sylva-elements/helm-charts/sriov-resources.git",
+    "repo_tag": "0.0.5",
+    "enabled_expression": "{{ not (empty .Values.sriov.node_policies) }}",
+    "helmrelease_values_template": {
+      "node_policies": "{{ .Values.sriov.node_policies | include \"preserve-type\" }}"
+    }
+  },
+  "_dependency_graph": {
+    "sriov": {
+      "depends_on": [],
+      "depended_by": ["sriov-network-operator"]
+    },
+    "sriov-crd": {
+      "depends_on": ["multus-ready"],
+      "depended_by": ["sriov-kyverno-policies", "sriov-network-operator"]
+    },
+    "sriov-init": {
+      "depends_on": [],
+      "depended_by": ["sriov-kyverno-policies", "sriov-network-operator", "sriov-resources"]
+    },
+    "sriov-kyverno-policies": {
+      "depends_on": ["sriov-init", "sriov-crd", "kyverno"],
+      "depended_by": []
+    },
+    "sriov-network-operator": {
+      "depends_on": ["sriov-init", "sriov-crd", "kyverno"],
+      "depended_by": ["sriov-resources", "nvidia-gpu-operator"]
+    },
+    "sriov-resources": {
+      "depends_on": ["sriov-init", "sriov-network-operator"],
+      "depended_by": []
+    },
+    "multus": {
+      "depends_on": ["multus-init"],
+      "depended_by": ["multus-ready"]
+    },
+    "multus-ready": {
+      "depends_on": ["multus"],
+      "depended_by": ["sriov-crd"]
+    },
+    "nvidia-gpu-operator": {
+      "depends_on": [],
+      "depended_by": [],
+      "notes": "conditionally disables its own NFD when sriov-network-operator is enabled"
+    },
+    "rancher-default-roles": {
+      "depends_on": ["rancher"],
+      "depended_by": [],
+      "notes": "contains sriovnetworks RoleTemplates (view-sriovnetworks, manage-sriovnetworks)"
+    }
+  },
+  "_distribution_comparison": {
+    "sriov": {
+      "summary": "same SUSE Edge operator and cattle-sriov-system namespace on all distros",
+      "okd_only_overrides": {
+        "sriov-crd.depends_on": {"multus-ready": false, "multus": false, "reason": "OKD ships multus built-in; multus-ready unit is disabled"},
+        "sriov-network-operator.helmrelease_spec.values.operator.cniBinPath": {"value": "/var/lib/cni/bin", "reason": "RHCOS uses /var/lib/cni/bin instead of /opt/cni/bin"}
+      },
+      "units_active": ["sriov-crd", "sriov-init", "sriov-kyverno-policies", "sriov-network-operator", "sriov-resources"]
+    }
+  },
+  "_metadata": {
+    "last_full_scan": "2026-06-05T11:45:00Z",
+    "sylva_core_path": "/home/abhi/sylva-core",
+    "source_file": "charts/sylva-units/values.yaml"
+  }
+}
